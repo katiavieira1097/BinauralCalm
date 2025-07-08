@@ -1,0 +1,8 @@
+{
+  "description": "App destinado a pessoas com TEA e TDAH que gera sons binaurais personalizados a partir dos gatilhos e comportamentos do usuário.",
+  "background_color": "#33a1be",
+  "id": "com.katiavieira.binauralcalm",
+  "theme_color": "#19a7da",
+  "short_name": "Binaural",
+  "name": "Binaural-Calm"
+}
