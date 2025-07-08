@@ -1,0 +1,523 @@
+```html
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>BinauralCalm</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  import React, { useState, useEffect, createContext, useContext, useRef } from 'react';
+import * as Tone from 'tone';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
+import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, getDocs, setDoc as setFirestoreDoc } from 'firebase/firestore';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+
+// Context for Firebase and User
+const AppContext = createContext(null);
+
+const AppProvider = ({ children }) => {
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [currentUser, setCurrentUser] = useState(null); // New state for current authenticated user
+
+  // Function to start Tone.js audio context
+  const startAudioContext = async () => {
+    if (Tone.context.state !== 'running') {
+      try {
+        await Tone.start();
+        console.log("Tone.js audio context resumed by user interaction.");
+      } catch (e) {
+        console.error("Error resuming Tone.js audio context:", e);
+      }
+    }
+  };
+
+  useEffect(() => {
+    try {
+      const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+      const app = initializeApp(firebaseConfig);
+      const firestoreDb = getFirestore(app);
+      const firebaseAuth = getAuth(app);
+
+      setDb(firestoreDb);
+      setAuth(firebaseAuth);
+
+      const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+        setCurrentUser(user); // Set the current user object
+        if (user) {
+          setUserId(user.uid);
+        } else {
+          // If no user, try to sign in anonymously (if no custom token)
+          try {
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+            if (initialAuthToken) {
+              await signInWithCustomToken(firebaseAuth, initialAuthToken);
+              setCurrentUser(firebaseAuth.currentUser); // Update user after custom token sign-in
+              setUserId(firebaseAuth.currentUser?.uid);
+            } else {
+              // If no initial token, and no user, try anonymous sign-in
+              await signInAnonymously(firebaseAuth);
+              setCurrentUser(firebaseAuth.currentUser); // Update user after anonymous sign-in
+              setUserId(firebaseAuth.currentUser?.uid);
+            }
+          } catch (e) {
+            console.error("Erro ao autenticar anonimamente:", e);
+            setError("Erro ao autenticar o usuário. Por favor, faça login ou crie uma conta.");
+            setUserId(null); // Ensure userId is null if anonymous sign-in fails
+          }
+        }
+        setIsAuthReady(true);
+        setLoading(false);
+      });
+
+      return () => unsubscribe();
+    } catch (e) {
+      console.error("Erro na inicialização do Firebase:", e);
+      setError("Erro na inicialização do aplicativo.");
+      setLoading(false);
+    }
+  }, []);
+
+  const handleLogin = async (email, password) => {
+    try {
+      setLoading(true);
+      await signInWithEmailAndPassword(auth, email, password);
+      // setMessage("Login realizado com sucesso!"); // Removed as it's handled by AuthScreen
+      setError(null);
+    } catch (e) {
+      console.error("Erro no login:", e);
+      setError("Erro no login: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRegister = async (email, password) => {
+    try {
+      setLoading(true);
+      await createUserWithEmailAndPassword(auth, email, password);
+      // setMessage("Conta criada e login realizado com sucesso!"); // Removed as it's handled by AuthScreen
+      setError(null);
+    } catch (e) {
+      console.error("Erro no registro:", e);
+      setError("Erro no registro: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      // setMessage("Logout realizado com sucesso."); // Removed as it's handled by AuthScreen
+      setUserId(null); // Clear userId on logout
+      setCurrentUser(null); // Clear currentUser on logout
+    } catch (e) {
+      console.error("Erro ao fazer logout:", e);
+      setError("Erro ao fazer logout: " + e.message);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-blue-100 text-blue-800">
+        Carregando aplicativo...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-red-100 text-red-800">
+        Erro: {error}
+      </div>
+    );
+  }
+
+  return (
+    <AppContext.Provider value={{ db, auth, userId, isAuthReady, startAudioContext, handleLogin, handleRegister, handleLogout, currentUser }}>
+      {currentUser ? children : <AuthScreen />}
+    </AppContext.Provider>
+  );
+};
+
+// Custom Hook to use App Context
+const useAppContext = () => {
+  const context = useContext(AppContext);
+  if (!context) {
+    throw new Error('useAppContext must be used within an AppProvider');
+  }
+  return context;
+};
+
+// AuthScreen Component
+const AuthScreen = () => {
+  const { handleLogin, handleRegister, loading, error } = useAppContext();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [authMessage, setAuthMessage] = useState('');
+
+  useEffect(() => {
+    if (error) {
+      setAuthMessage(error);
+    } else {
+      setAuthMessage('');
+    }
+  }, [error]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setAuthMessage('');
+    if (isRegisterMode) {
+      await handleRegister(email, password);
+    } else {
+      await handleLogin(email, password);
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-blue-100 p-4">
+      <div className="bg-white p-8 rounded-lg shadow-xl w-full max-w-md">
+        <h2 className="text-3xl font-bold text-blue-700 mb-6 text-center">
+          {isRegisterMode ? 'Criar Conta' : 'Fazer Login'}
+        </h2>
+        <p className="text-gray-700 text-center mb-6">
+          {isRegisterMode ? 'Crie uma conta para salvar suas configurações e progresso.' : 'Faça login para acessar o aplicativo.'}
+        </p>
+        <form onSubmit={handleSubmit}>
+          <div className="mb-4">
+            <label htmlFor="email" className="block text-gray-700 text-sm font-bold mb-2">Email:</label>
+            <input
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="seuemail@exemplo.com"
+              required
+              className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+            />
+          </div>
+          <div className="mb-6">
+            <label htmlFor="password" className="block text-gray-700 text-sm font-bold mb-2">Senha:</label>
+            <input
+              type="password"
+              id="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="********"
+              required
+              className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 mb-3 leading-tight focus:outline-none focus:shadow-outline"
+            />
+          </div>
+          {authMessage && <p className="text-red-500 text-sm text-center mb-4">{authMessage}</p>}
+          <button
+            type="submit"
+            disabled={loading}
+            className={`w-full px-6 py-3 bg-blue-600 text-white font-bold rounded-lg shadow-md ${loading ? 'opacity-50 cursor-not-allowed' : 'hover:bg-blue-700'} transition duration-300 ease-in-out`}
+          >
+            {loading ? 'Carregando...' : (isRegisterMode ? 'Registrar' : 'Entrar')}
+          </button>
+        </form>
+        <div className="mt-6 text-center">
+          <button
+            onClick={() => setIsRegisterMode(!isRegisterMode)}
+            className="text-blue-600 hover:text-blue-800 text-sm font-semibold transition duration-300"
+          >
+            {isRegisterMode ? 'Já tem uma conta? Faça login' : 'Não tem uma conta? Crie uma'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// Components
+const Header = ({ setView }) => {
+  const { handleLogout, currentUser } = useAppContext();
+  return (
+    <header className="bg-blue-600 text-white p-4 shadow-md rounded-b-lg w-full">
+      <nav className="flex flex-wrap justify-center gap-4">
+        <button onClick={() => setView('home')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Início</button>
+        <button onClick={() => setView('binaural')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Gerador Binaural</button>
+        <button onClick={() => setView('routine')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Rotina Diária</button>
+        <button onClick={() => setView('selfAssessment')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Autoavaliação</button>
+        <button onClick={() => setView('soundLibrary')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Biblioteca de Sons</button>
+        <button onClick={() => setView('antiStress')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Atividades Antiestresse</button>
+        <button onClick={() => setView('communication')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Melhorar Comunicação</button>
+        <button onClick={() => setView('instrumentalMusic')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Música Instrumental</button>
+        <button onClick={() => setView('aiHelper')} className="px-4 py-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition duration-300 ease-in-out">Ajuda da IA</button>
+        {currentUser && (
+          <button onClick={handleLogout} className="px-4 py-2 bg-red-700 hover:bg-red-800 rounded-lg transition duration-300 ease-in-out">Sair</button>
+        )}
+      </nav>
+    </header>
+  );
+};
+
+const Home = () => {
+  const { userId, currentUser } = useAppContext();
+  return (
+    <div className="p-6 text-center bg-white rounded-lg shadow-lg">
+      <h2 className="text-3xl font-bold text-blue-700 mb-4">Bem-vindo ao App de Sons Binaurais!</h2>
+      <p className="text-lg text-gray-700 mb-6">
+        Este aplicativo foi desenvolvido para ajudar a criar um ambiente sonoro calmante e estruturado.
+        Explore as seções para gerar sons personalizados, organizar sua rotina e acompanhar seu bem-estar.
+      </p>
+      {userId && (
+        <p className="text-sm text-gray-500">Seu ID de Usuário: <span className="font-mono break-all">{userId}</span></p>
+      )}
+      {currentUser && currentUser.email && (
+        <p className="text-sm text-gray-500">Logado como: <span className="font-mono break-all">{currentUser.email}</span></p>
+      )}
+    </div>
+  );
+};
+
+const BinauralGenerator = () => {
+  const { db, userId, isAuthReady, startAudioContext } = useAppContext();
+  const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+  const [behavior, setBehavior] = useState('');
+  const [trigger, setTrigger] = useState('');
+  const [frequencyDiff, setFrequencyDiff] = useState(5); // Default 5 Hz difference
+  const [baseFrequency, setBaseFrequency] = useState(220); // Default 220 Hz base
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [player, setPlayer] = useState(null);
+  const [message, setMessage] = useState('');
+  const [userSounds, setUserSounds] = useState([]);
+  const [editingSound, setEditingSound] = useState(null);
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false); // State for upgrade modal
+  const [showPixInfo, setShowPixInfo] = useState(false); // State for Pix info
+
+  // Fetch user's saved sounds
+  useEffect(() => {
+    if (!isAuthReady || !db || !userId) return;
+
+    const soundsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/binauralSounds`);
+    const q = query(soundsCollectionRef);
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const soundsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setUserSounds(soundsData);
+    }, (error) => {
+      console.error("Erro ao buscar sons binaurais:", error);
+      setMessage("Erro ao carregar seus sons.");
+    });
+
+    return () => unsubscribe();
+  }, [db, userId, isAuthReady, appId]);
+
+  const createBinauralPlayer = (diff, base) => {
+    // Master gain for overall volume control
+    const masterGain = new Tone.Gain(0.5).toDestination(); // Reduce overall volume slightly
+
+    // Subtle low-pass filter to soften high frequencies
+    const filter = new Tone.Filter(8000, "lowpass").connect(masterGain); // Cutoff at 8kHz, adjust as needed
+
+    // Very subtle reverb for spaciousness
+    const reverb = new Tone.Reverb({ decay: 1, wet: 0.1 }).connect(filter); // Short decay, very low wet mix
+    reverb.generate(); // Pre-render reverb impulse response
+
+    // Oscillators with smoother envelopes
+    const osc1 = new Tone.Oscillator({
+      frequency: base,
+      type: "sine", // Sine wave is inherently smooth
+      envelope: {
+        attack: 0.5,   // Slower attack for gentle fade-in
+        decay: 0.1,
+        sustain: 1,
+        release: 1.0  // Longer release for gentle fade-out
+      }
+    }).connect(reverb); // Connect to reverb
+
+    const osc2 = new Tone.Oscillator({
+      frequency: base + diff,
+      type: "sine",
+      envelope: {
+        attack: 0.5,
+        decay: 0.1,
+        sustain: 1,
+        release: 1.0
+      }
+    }).connect(reverb); // Connect to reverb
+
+    const newPlayer = { osc1, osc2, masterGain, filter, reverb }; // Keep references to all nodes for disposal
+    setPlayer(newPlayer);
+    return newPlayer;
+  };
+
+  const playSound = async () => {
+    await startAudioContext(); // Ensure audio context is started on user interaction
+    if (player) {
+      player.osc1.stop();
+      player.osc2.stop();
+      player.osc1.dispose();
+      player.osc2.dispose();
+      player.masterGain.dispose();
+      player.filter.dispose();
+      player.reverb.dispose();
+    }
+
+    const newPlayer = createBinauralPlayer(frequencyDiff, baseFrequency);
+    newPlayer.osc1.start();
+    newPlayer.osc2.start();
+    setIsPlaying(true);
+    setMessage('Som binaural tocando...');
+  };
+
+  const stopSound = () => {
+    if (player) {
+      player.osc1.stop();
+      player.osc2.stop();
+      player.osc1.dispose();
+      player.osc2.dispose();
+      player.masterGain.dispose(); // Dispose all nodes
+      player.filter.dispose();
+      player.reverb.dispose();
+      setPlayer(null);
+    }
+    setIsPlaying(false);
+    setMessage('Som parado.');
+  };
+
+  const handleGenerateAndPlay = () => {
+    if (isPlaying) {
+      stopSound();
+    }
+    playSound();
+  };
+
+  const handleSaveSound = async () => {
+    if (!db || !userId || !isAuthReady) {
+      setMessage("Erro: Usuário não autenticado ou Firebase não inicializado.");
+      return;
+    }
+
+    if (!behavior && !trigger) {
+      setMessage("Por favor, preencha o comportamento ou o gatilho para salvar o som.");
+      return;
+    }
+
+    try {
+      const soundData = {
+        behavior,
+        trigger,
+        frequencyDiff,
+        baseFrequency,
+        timestamp: new Date().toISOString(),
+      };
+
+      if (editingSound) {
+        // Update existing sound
+        const docRef = doc(db, `artifacts/${appId}/users/${userId}/binauralSounds`, editingSound.id);
+        await updateDoc(docRef, soundData);
+        setMessage("Som modificado com sucesso!");
+        setEditingSound(null);
+      } else {
+        // Add new sound
+        await addDoc(collection(db, `artifacts/${appId}/users/${userId}/binauralSounds`), soundData);
+        setMessage("Som salvo com sucesso!");
+        // Check if limit is reached after saving
+        // Fetch the latest count of sounds after adding a new one
+        const soundsSnapshot = await getDocs(collection(db, `artifacts/${appId}/users/${userId}/binauralSounds`));
+        if (soundsSnapshot.docs.length >= 5) {
+          setShowUpgradeModal(true);
+        }
+      }
+      setBehavior('');
+      setTrigger('');
+    } catch (e) {
+      console.error("Erro ao salvar som:", e);
+      setMessage("Erro ao salvar o som.");
+    }
+  };
+
+  const handleEditSound = (sound) => {
+    setEditingSound(sound);
+    setBehavior(sound.behavior);
+    setTrigger(sound.trigger);
+    setFrequencyDiff(sound.frequencyDiff);
+    setBaseFrequency(sound.baseFrequency);
+    setMessage("Editando som...");
+  };
+
+  const handleDeleteSound = async (soundId) => {
+    if (!db || !userId || !isAuthReady) {
+      setMessage("Erro: Usuário não autenticado ou Firebase não inicializado.");
+      return;
+    }
+    try {
+      await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/binauralSounds`, soundId));
+      setMessage("Som excluído com sucesso!");
+    } catch (e) {
+      console.error("Erro ao excluir som:", e);
+      setMessage("Erro ao excluir a som.");
+    }
+  };
+
+  // Cleanup Tone.js on unmount
+  useEffect(() => {
+    return () => {
+      if (player) {
+        player.osc1.stop();
+        player.osc2.stop();
+        player.osc1.dispose();
+        player.osc2.dispose();
+        player.masterGain.dispose();
+        player.filter.dispose();
+        player.reverb.dispose();
+      }
+      Tone.Transport.stop();
+      Tone.Transport.cancel();
+    };
+  }, [player]);
+
+  return (
+    <div className="p-6 bg-white rounded-lg shadow-lg">
+      <h2 className="text-2xl font-bold text-blue-700 mb-4">Gerador de Sons Binaurais</h2>
+      <p className="text-gray-700 mb-4">Crie sons personalizados para acalmar durante uma crise, baseados em seu comportamento e gatilhos.</p>
+
+      <div className="mb-4">
+        <label htmlFor="behavior" className="block text-gray-700 text-sm font-bold mb-2">Comportamento durante a crise:</label>
+        <input
+          type="text"
+          id="behavior"
+          value={behavior}
+          onChange={(e) => setBehavior(e.target.value)}
+          placeholder="Ex: Agitação, choro, isolamento"
+          className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+        />
+      </div>
+
+      <div className="mb-4">
+        <label htmlFor="trigger" className="block text-gray-700 text-sm font-bold mb-2">Gatilhos identificados:</label>
+        <input
+          type="text"
+          id="trigger"
+          value={trigger}
+          onChange={(e) => setTrigger(e.target.value)}
+          placeholder="Ex: Ruídos altos, luzes fortes, mudanças de rotina"
+          className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+        />
+      </div>
+
+      <div className="mb-4">
+        <label htmlFor="baseFrequency" className="block text-gray-700 text-sm font-bold mb-2">Frequência Base (Hz): {baseFrequency.toFixed(0)}</label>
+        <input
+          type="range"
+          id="baseFrequency"
+          min="100"
+          max="500"
+          value={baseFrequency}
+          onChange={(e) => setBaseFrequency(parseFloat(e.target.value))}
+          className="w-full h-2 bg-gray-200 rounded-lg appearance-none curso
+</body>
+</html>
